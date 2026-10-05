@@ -1,0 +1,32 @@
+name: Godot Portable Artifact
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/godot-portable.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package-godot:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify Godot 4.6.1 stable
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          URL="https://github.com/godotengine/godot-builds/releases/download/4.6.1-stable/Godot_v4.6.1-stable_linux.x86_64.zip"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 300 "$URL" -o Godot_v4.6.1-stable_linux.x86_64.zip
+          echo "cecd0cb6b55e931318a9d7237dc4197d69ea914966787a454808523626e2789f  Godot_v4.6.1-stable_linux.x86_64.zip" | sha256sum --check
+      - name: Upload verified Godot runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: godot-4.6.1-stable-linux-x86_64
+          path: ${{ runner.temp }}/Godot_v4.6.1-stable_linux.x86_64.zip
+          compression-level: 0
+          retention-days: 1
