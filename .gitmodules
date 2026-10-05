@@ -1,0 +1,6 @@
+[submodule "vendor/blender-game-skills"]
+	path = vendor/blender-game-skills
+	url = https://github.com/majidmanzarpour/blender-game-skills.git
+[submodule "vendor/blender-claude-skill"]
+	path = vendor/blender-claude-skill
+	url = https://github.com/MartinRapcan/blender-claude-skill.git

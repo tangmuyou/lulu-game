@@ -7,6 +7,10 @@ on:
     paths:
       - '.github/workflows/blender-cloud.yml'
       - 'tools/blender/**'
+      - 'vendor/**'
+      - '.gitmodules'
+      - '.agents/**'
+      - 'AGENTS.md'
 
 permissions:
   contents: read
@@ -17,25 +21,40 @@ concurrency:
 
 jobs:
   build-test-asset:
-    name: Build and validate Blender asset
-    # Standard hosted CPU runner only. Do not run after a switch to private.
+    name: Build and validate Blender asset with installed skills
     if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       BLENDER_VERSION: '4.5.14'
     steps:
-      - name: Check out project
+      - name: Check out project and pinned skills
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          submodules: recursive
 
       - name: Install Blender runtime dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libxi6 libxrender1 libxfixes3 libxxf86vm1 libxkbcommon0 \
-            libgl1 libegl1 libsm6
+            libgl1 libegl1 libsm6 python3-pil
+
+      - name: Verify installed skill revisions and licenses
+        run: python3 tools/blender/skills_setup.py
+
+      - name: Install pinned Khronos validator without install scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm install --prefix "$RUNNER_TEMP/lulu-gltf-validator" \
+            --ignore-scripts --no-audit --no-fund --save-exact gltf-validator@2.0.0-dev.3.10
+          echo "GLTF_VALIDATOR_MODULE=$RUNNER_TEMP/lulu-gltf-validator/node_modules/gltf-validator" >> "$GITHUB_ENV"
+          cp "$RUNNER_TEMP/lulu-gltf-validator/package-lock.json" artifacts/gltf-validator-package-lock.json
+          mkdir -p artifacts/licenses
+          find "$RUNNER_TEMP/lulu-gltf-validator/node_modules/gltf-validator" -maxdepth 1 -iname '*license*' -exec cp {} artifacts/licenses/ \;
 
       - name: Download and verify official Blender
         shell: bash
@@ -66,27 +85,44 @@ jobs:
             --python tools/blender/smoke_test.py -- --output artifacts \
             2>&1 | tee artifacts/logs/blender.log
 
-      - name: Check required outputs
+      - name: Exercise installed skills and CPU roundtrip adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          blender --background --factory-startup --python-exit-code 1 \
+            --python tools/blender/skills_qa.py -- --output artifacts \
+            2>&1 | tee artifacts/logs/skills_qa.log
+
+      - name: Validate real GLB and reject intentionally corrupt bytes
+        run: node tools/blender/gltf_check.cjs artifacts/model/cloud_test_crate.glb artifacts
+
+      - name: Check required outputs and nonempty previews
         shell: bash
         run: |
           python3 - <<'PY'
           import json
           from pathlib import Path
+          from PIL import Image
           root = Path('artifacts')
           required = [
               'model/cloud_test_crate.glb', 'model/cloud_test_crate.blend',
-              'textures/wood_basecolor.png', 'validation.json',
-              'preview/front.png', 'preview/back.png',
-              'preview/left.png', 'preview/right.png',
+              'textures/wood_basecolor.png', 'installed_blender_skills.zip',
+              'preview/front.png', 'preview/back.png', 'preview/left.png', 'preview/right.png',
+              'qa/roundtrip/roundtrip_clay_threequarter.png',
           ]
           for name in required:
-              path = root / name
-              if not path.is_file() or path.stat().st_size == 0:
+              p = root / name
+              if not p.is_file() or not p.stat().st_size:
                   raise SystemExit(f'Missing or empty output: {name}')
-          report = json.loads((root / 'validation.json').read_text())
-          if report.get('status') != 'passed':
-              raise SystemExit('Blender validation did not pass')
-          print(json.dumps(report, indent=2))
+              if name.endswith('.png'):
+                  with Image.open(p) as im:
+                      if im.convert('RGBA').getchannel('A').getbbox() is None:
+                          raise SystemExit(f'Fully transparent image: {name}')
+          for name in ('validation.json', 'skills_installation.json', 'skills_qa.json', 'gltf_validation_summary.json'):
+              data = json.loads((root / name).read_text())
+              if data.get('status') != 'passed':
+                  raise SystemExit(f'Validation did not pass: {name}')
+          print('ALL_BLENDER_SKILL_INSTALLATION_CHECKS_PASSED')
           PY
 
       - name: Write task summary
@@ -94,26 +130,24 @@ jobs:
         shell: bash
         run: |
           {
-            echo '## Blender cloud pipeline'
-            echo ''
-            echo 'This run builds a small test crate, not a finished game asset.'
-            echo 'Previews are rendered from the exported and reimported GLB.'
-            echo 'Download the artifact below for the GLB, blend file, texture, previews and logs.'
-            echo ''
-            if [ -f artifacts/validation.json ]; then
-              echo '```json'
-              cat artifacts/validation.json
-              echo '```'
-            else
-              echo 'Validation did not finish. Check the failed step and Blender log.'
-            fi
+            echo '## Blender cloud with pinned production skills'
+            echo 'Test crate only; technical checks are not visual acceptance or Godot runtime tests.'
+            echo 'The negative-scale and corrupt-GLB reports are intentional rejection tests.'
+            for report in skills_installation skills_qa gltf_validation_summary; do
+              if [ -f "artifacts/$report.json" ]; then
+                echo "### $report"
+                echo '```json'
+                cat "artifacts/$report.json"
+                echo '```'
+              fi
+            done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload asset package and logs
+      - name: Upload asset, installed skills, reports and logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: blender-cloud-test-${{ github.run_number }}
+          name: blender-cloud-skills-${{ github.run_number }}
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
