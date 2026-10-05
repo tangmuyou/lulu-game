@@ -1,0 +1,37 @@
+name: Blender Portable Artifact
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/blender-portable.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package-blender:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BLENDER_VERSION: '4.5.14'
+    steps:
+      - name: Download and verify official Blender archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          ARCHIVE="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          CHECKSUMS="blender-${BLENDER_VERSION}.sha256"
+          BASE_URL="https://download.blender.org/release/Blender4.5"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 300 "$BASE_URL/$ARCHIVE" -o "$ARCHIVE"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 60 "$BASE_URL/$CHECKSUMS" -o "$CHECKSUMS"
+          sha256sum --check --ignore-missing "$CHECKSUMS"
+      - name: Upload verified portable Blender
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: blender-4.5.14-linux-x64
+          path: ${{ runner.temp }}/blender-4.5.14-linux-x64.tar.xz
+          compression-level: 0
+          retention-days: 1
