@@ -1,0 +1,119 @@
+name: Blender Cloud
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/blender-cloud.yml'
+      - 'tools/blender/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blender-cloud-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-test-asset:
+    name: Build and validate Blender asset
+    # Standard hosted CPU runner only. Do not run after a switch to private.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BLENDER_VERSION: '4.5.14'
+    steps:
+      - name: Check out project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Blender runtime dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxi6 libxrender1 libxfixes3 libxxf86vm1 libxkbcommon0 \
+            libgl1 libegl1 libsm6
+
+      - name: Download and verify official Blender
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOWNLOAD_DIR="$RUNNER_TEMP/blender-download"
+          INSTALL_DIR="$RUNNER_TEMP/blender"
+          mkdir -p "$DOWNLOAD_DIR" "$INSTALL_DIR"
+          cd "$DOWNLOAD_DIR"
+          ARCHIVE="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          CHECKSUMS="blender-${BLENDER_VERSION}.sha256"
+          BASE_URL="https://download.blender.org/release/Blender4.5"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 300 \
+            "$BASE_URL/$ARCHIVE" -o "$ARCHIVE"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 60 \
+            "$BASE_URL/$CHECKSUMS" -o "$CHECKSUMS"
+          sha256sum --check --ignore-missing "$CHECKSUMS"
+          tar -xJf "$ARCHIVE" --strip-components=1 -C "$INSTALL_DIR"
+          echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+          "$INSTALL_DIR/blender" --version
+
+      - name: Build model, export GLB, reimport and render previews
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/logs
+          blender --background --factory-startup --python-exit-code 1 \
+            --python tools/blender/smoke_test.py -- --output artifacts \
+            2>&1 | tee artifacts/logs/blender.log
+
+      - name: Check required outputs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('artifacts')
+          required = [
+              'model/cloud_test_crate.glb', 'model/cloud_test_crate.blend',
+              'textures/wood_basecolor.png', 'validation.json',
+              'preview/front.png', 'preview/back.png',
+              'preview/left.png', 'preview/right.png',
+          ]
+          for name in required:
+              path = root / name
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f'Missing or empty output: {name}')
+          report = json.loads((root / 'validation.json').read_text())
+          if report.get('status') != 'passed':
+              raise SystemExit('Blender validation did not pass')
+          print(json.dumps(report, indent=2))
+          PY
+
+      - name: Write task summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Blender cloud pipeline'
+            echo ''
+            echo 'This run builds a small test crate, not a finished game asset.'
+            echo 'Previews are rendered from the exported and reimported GLB.'
+            echo 'Download the artifact below for the GLB, blend file, texture, previews and logs.'
+            echo ''
+            if [ -f artifacts/validation.json ]; then
+              echo '```json'
+              cat artifacts/validation.json
+              echo '```'
+            else
+              echo 'Validation did not finish. Check the failed step and Blender log.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload asset package and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: blender-cloud-test-${{ github.run_number }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
